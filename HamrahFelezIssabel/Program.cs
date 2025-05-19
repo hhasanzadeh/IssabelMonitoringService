@@ -213,7 +213,6 @@ namespace IssabelCallMonitor
                 var ext = ExtractExtensionFromChannel(channel);
                 Log($"Processing non-trunk channel for call {uniqueId}, channel {channel}, caller {callerId ?? "unknown"}, ext {ext ?? "null"}");
 
-                // بررسی کانال‌های غیرترانک (ممکنه داخلی برای تماس ورودی یا خروجی باشه)
                 lock (activeCalls)
                 {
                     lock (channelMap)
@@ -228,31 +227,33 @@ namespace IssabelCallMonitor
 
                         if (callInfo != null && ext != null)
                         {
-                            // به‌روزرسانی تماس‌های ورودی (ترانک به داخلی)
-                            if (ringGroupNumber != null)
+                            // فقط برای تماس‌های ورودی رینگ‌گروپ بررسی شود
+                            if (callInfo.CallType == "Inbound")
                             {
-                                callInfo.Target = ringGroupNumber;
-                                callInfo.IsRingGroup = true;
-                                callInfo.RingGroupNumber = ringGroupNumber;
-                                callInfo.RingGroupExtensions = ringGroups[ringGroupNumber].Extensions.ToList();
-                                callInfo.Strategy = ringGroups[ringGroupNumber].Strategy;
-                                Log($"Updated call {callInfo.UniqueId} target to {ringGroupNumber} (ring group), IsRingGroup: True, CallType: {callInfo.CallType}");
-                            }
-                            else if (callInfo.Target == null)
-                            {
-                                callInfo.Target = ext;
-                                callInfo.IsRingGroup = false;
-                                callInfo.RingGroupNumber = null;
-                                callInfo.RingGroupExtensions = new List<string>();
-                                callInfo.Strategy = null;
-                                Log($"Updated call {callInfo.UniqueId} target to {ext} (direct), IsRingGroup: False, CallType: {callInfo.CallType}");
+                                if (ringGroupNumber != null)
+                                {
+                                    callInfo.Target = ringGroupNumber;
+                                    callInfo.IsRingGroup = true;
+                                    callInfo.RingGroupNumber = ringGroupNumber;
+                                    callInfo.RingGroupExtensions = ringGroups[ringGroupNumber].Extensions.ToList();
+                                    callInfo.Strategy = ringGroups[ringGroupNumber].Strategy;
+                                    Log($"Updated call {callInfo.UniqueId} target to {ringGroupNumber} (ring group), IsRingGroup: True, CallType: {callInfo.CallType}");
+                                }
+                                else if (callInfo.Target == null)
+                                {
+                                    callInfo.Target = ext;
+                                    callInfo.IsRingGroup = false;
+                                    callInfo.RingGroupNumber = null;
+                                    callInfo.RingGroupExtensions = new List<string>();
+                                    callInfo.Strategy = null;
+                                    Log($"Updated call {callInfo.UniqueId} target to {ext} (direct), IsRingGroup: False, CallType: {callInfo.CallType}");
+                                }
                             }
 
                             channelMap[channel] = new ChannelInfo { CallUniqueId = callInfo.UniqueId, Timestamp = DateTime.Now };
                         }
                         else
                         {
-                            // تماس‌های غیرترانک (مثل داخلی به داخلی) موقتاً ثبت می‌شن تا در DialBegin بررسی بشن
                             channelMap[channel] = new ChannelInfo { CallUniqueId = null, Timestamp = DateTime.Now };
                             Log($"Non-trunk channel {channel} (ext {ext ?? "null"}) queued for potential outbound call, uniqueid {uniqueId}");
                         }
@@ -260,7 +261,6 @@ namespace IssabelCallMonitor
                 }
             }
         }
-
         private void Manager_DialBegin(object sender, DialBeginEvent e)
         {
             lock (activeCalls)
@@ -595,17 +595,19 @@ namespace IssabelCallMonitor
 
                 if (answeredExtensions.Any())
                 {
-                    foreach (var answeredExt in answeredExtensions)
+                    // برای تماس‌های خروجی، همیشه از call.Caller به‌عنوان AnsweredBy استفاده می‌کنیم
+                    var effectiveAnsweredExt = callInfo.CallType == "Outbound" ? callInfo.Caller : callInfo.AnsweredExtensions.FirstOrDefault();
+                    if (!string.IsNullOrEmpty(effectiveAnsweredExt))
                     {
-                        var pkCommunication = await QueryCommunication(callInfo.UniqueId, answeredExt);
+                        var pkCommunication = await QueryCommunication(callInfo.UniqueId, effectiveAnsweredExt);
                         if (!string.IsNullOrEmpty(pkCommunication))
                         {
-                            callInfo.PkCommunications[answeredExt] = pkCommunication;
+                            callInfo.PkCommunications[effectiveAnsweredExt] = pkCommunication;
                             await SendApiRequest(
                                 callInfo,
                                 true,
-                                callInfo.IsRingGroup ? ringGroupNumber : target,
-                                answeredExt,
+                                callInfo.IsRingGroup && isInbound ? ringGroupNumber : target,
+                                effectiveAnsweredExt,
                                 pkCommunication
                             );
                         }
@@ -613,7 +615,6 @@ namespace IssabelCallMonitor
                 }
                 else if (callInfo.IsRingGroup && callInfo.MissedExtensions.Count < callInfo.RingGroupExtensions.Count)
                 {
-                    // اگر برخی داخلی‌ها missed نشدن، اونا رو اضافه می‌کنیم
                     foreach (var ext in callInfo.RingGroupExtensions)
                     {
                         if (!callInfo.MissedExtensions.Contains(ext))
@@ -623,7 +624,6 @@ namespace IssabelCallMonitor
                     }
                 }
 
-                // اگر هیچ داخلی پاسخ نداده و تماس RingGroup بوده، برای همه داخلی‌ها missed ثبت کن
                 if (!answeredExtensions.Any() && callInfo.IsRingGroup)
                 {
                     foreach (var missedExt in callInfo.MissedExtensions.Distinct())
@@ -637,7 +637,6 @@ namespace IssabelCallMonitor
                         Log($"Missed call recorded for extension {missedExt} in ring group {ringGroupNumber}, call {callInfo.UniqueId}");
                     }
                 }
-
             }
         }
         private async Task<string> QueryCommunication(string callId, string answeredBy)
@@ -757,7 +756,7 @@ namespace IssabelCallMonitor
                 };
 
                 var jsonPayload = JsonConvert.SerializeObject(payload);
-                Log($"Sending API request to {endpoint} for call {call.UniqueId}, CalledTarget: {calledTarget}, AnsweredBy: {answeredBy}, Status: {(answered ? "Answered" : "Missed")}, Duration: {call.Duration}, fkOptionDirection: {payload.fkOptionDirection}");
+                Log($"Sending API request to {endpoint} for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, Status: {(answered ? "Answered" : "Missed")}, Duration: {call.Duration}, fkOptionDirection: {payload.fkOptionDirection}");
                 Log($"API payload: {jsonPayload}");
 
                 var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
@@ -765,7 +764,7 @@ namespace IssabelCallMonitor
 
                 if (response.IsSuccessStatusCode)
                 {
-                    Log($"API request succeeded for call {call.UniqueId}, CalledTarget: {calledTarget}, AnsweredBy: {answeredBy}, Duration: {call.Duration}");
+                    Log($"API request succeeded for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, Duration: {call.Duration}");
                 }
                 else
                 {
