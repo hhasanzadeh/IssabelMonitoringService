@@ -708,6 +708,11 @@ namespace IssabelCallMonitor
                     : "http://192.168.50.10:8080/api/admin/Communication/UpdateCommunication";
 
                 Log($"[API] Entering SendApiRequest for call {call.UniqueId}, CalledTarget: {calledTarget}, AnsweredBy: {answeredBy}, answered: {answered}, pkCommunication: {pkCommunication ?? "null"}");
+                
+                string phoneNumber = call.CallType == "Outbound" ? call.Target : call.Caller;
+                string normalizedPhoneNumber = NormalizePhoneNumber(phoneNumber);
+                string payloadCalledTarget = call.CallType == "Outbound" ? call.Caller : calledTarget;
+                string payloadAnsweredBy = call.CallType == "Outbound" ? call.Caller : (answeredBy ?? "");
 
                 var payload = new
                 {
@@ -721,10 +726,10 @@ namespace IssabelCallMonitor
                     fkOptionOwnCallReason = 33,
                     fkOptionStatus = 1551,
                     fkOptionCallStatus = answered ? 1511 : 1512,
-                    PhoneNumber = call.Caller,
-                    NormalizedPhoneNumber = NormalizePhoneNumber(call.Caller),
-                    CalledTarget = calledTarget,
-                    AnsweredBy = answeredBy ?? "",
+                    PhoneNumber = phoneNumber,
+                    NormalizedPhoneNumber = normalizedPhoneNumber,
+                    CalledTarget = payloadCalledTarget,
+                    AnsweredBy = payloadAnsweredBy,
                     CustomerRating = 0,
                     Duration = call.Duration,
                     DescriptionEmployee = "",
