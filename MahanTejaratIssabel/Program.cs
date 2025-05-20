@@ -617,29 +617,27 @@ namespace IssabelCallMonitor
                         }
                     }
                 }
-                else if (callInfo.IsRingGroup && callInfo.MissedExtensions.Count < callInfo.RingGroupExtensions.Count)
+                else if (callInfo.IsRingGroup && isInbound)
                 {
-                    foreach (var ext in callInfo.RingGroupExtensions)
-                    {
-                        if (!callInfo.MissedExtensions.Contains(ext))
-                        {
-                            callInfo.MissedExtensions.Add(ext);
-                        }
-                    }
+                    // اگر هیچ داخلی پاسخ نداده، فقط برای شماره رینگ‌گروپ ثبت می‌کنیم
+                    await SendApiRequest(
+                        callInfo,
+                        false,
+                        ringGroupNumber,
+                        "" // بدون AnsweredBy، چون هیچ‌کس پاسخ نداده
+                    );
+                    Log($"Missed call recorded for ring group {ringGroupNumber}, call {callInfo.UniqueId}");
                 }
-
-                if (!answeredExtensions.Any() && callInfo.IsRingGroup)
+                else if (!callInfo.IsRingGroup)
                 {
-                    foreach (var missedExt in callInfo.MissedExtensions.Distinct())
-                    {
-                        await SendApiRequest(
-                            callInfo,
-                            false,
-                            ringGroupNumber,
-                            missedExt
-                        );
-                        Log($"Missed call recorded for extension {missedExt} in ring group {ringGroupNumber}, call {callInfo.UniqueId}");
-                    }
+                    // برای تماس‌های غیر رینگ‌گروپ، مثل قبل رفتار می‌کنیم
+                    await SendApiRequest(
+                        callInfo,
+                        false,
+                        target,
+                        ""
+                    );
+                    Log($"Missed call recorded for target {target}, call {callInfo.UniqueId}");
                 }
             }
         }
