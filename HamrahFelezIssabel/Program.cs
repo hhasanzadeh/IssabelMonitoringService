@@ -194,8 +194,8 @@ namespace IssabelCallMonitor
                     Strategy = null,
                     AnsweredExtensions = new List<string>(),
                     MissedExtensions = new List<string>(),
-                    PkCommunications = new Dictionary<string, string>(),
-                    CallType = callType
+                    CallType = callType,
+                    Duration = 0
                 };
 
                 lock (activeCalls)
@@ -267,6 +267,7 @@ namespace IssabelCallMonitor
                 }
             }
         }
+
         private void Manager_DialBegin(object sender, DialBeginEvent e)
         {
             lock (activeCalls)
@@ -299,8 +300,8 @@ namespace IssabelCallMonitor
                         Strategy = null,
                         AnsweredExtensions = new List<string>(),
                         MissedExtensions = new List<string>(),
-                        PkCommunications = new Dictionary<string, string>(),
-                        CallType = "Outbound"
+                        CallType = "Outbound",
+                        Duration = 0
                     };
 
                     activeCalls[e.UniqueId] = callInfo;
@@ -323,15 +324,17 @@ namespace IssabelCallMonitor
                 {
                     var callInfo = activeCalls[e.UniqueId];
 
-                    if (destExt == null)
+                    // اگر destChannel نامعتبر است، از DialString استفاده می‌کنیم
+                    if (destExt == null || destChannel == "unknown")
                     {
-                        Log($"Skipping DialBegin for call {e.UniqueId}: Invalid destination channel {destChannel}");
-                        // از DialString برای گرفتن داخلی استفاده می‌کنیم
-                        destExt = dialedNumber; // مثلاً "122"
-                        if (string.IsNullOrWhiteSpace(destExt) || destExt == "unknown")
-                        {
-                            return;
-                        }
+                        destExt = dialedNumber; // مثلاً "203"
+                        Log($"Extracted destExt={destExt} from DialString for call {e.UniqueId}");
+                    }
+
+                    if (string.IsNullOrWhiteSpace(destExt) || destExt == "unknown")
+                    {
+                        Log($"Skipping DialBegin for call {e.UniqueId}: Invalid destination extension");
+                        return;
                     }
 
                     if (callInfo.Target == null)
@@ -380,11 +383,15 @@ namespace IssabelCallMonitor
                                 if (!callInfo.AnsweredExtensions.Contains(missedExt) && !callInfo.MissedExtensions.Contains(missedExt))
                                 {
                                     callInfo.MissedExtensions.Add(missedExt);
-                                    // برای hunt-prim، داخلی‌های قبلی رو ثبت نمی‌کنیم
                                     Log($"Marked extension {missedExt} as missed for call {e.UniqueId}, but not sending API request");
                                 }
                             }
                         }
+                    }
+                    else if (!callInfo.IsRingGroup)
+                    {
+                        callInfo.LastDialedExtension = destExt; // برای تماس‌های مستقیم هم ذخیره می‌کنیم
+                        Log($"Stored LastDialedExtension: {destExt} for call {e.UniqueId} (direct)");
                     }
                 }
                 else
@@ -393,6 +400,7 @@ namespace IssabelCallMonitor
                 }
             }
         }
+
         private async void Manager_DialEnd(object sender, DialEndEvent e)
         {
             CallInfo callInfo = null;
@@ -425,14 +433,15 @@ namespace IssabelCallMonitor
                 {
                     if (dialStatus == "ANSWER")
                     {
-                        callInfo.AnswerTime = DateTime.Now;
                         callInfo.AnsweredExtensions.Add(callInfo.Target);
+                        callInfo.IsProcessed = true; // تنظیم پرچم
                         await SendApiRequest(callInfo, true, callInfo.Target, callInfo.Target);
-                        Log($"Outbound call {e.UniqueId} answered, Target: {callInfo.Target}, AnswerTime: {callInfo.AnswerTime}");
+                        Log($"Outbound call {e.UniqueId} answered, Target: {callInfo.Target}");
                     }
                     else
                     {
                         callInfo.MissedExtensions.Add(callInfo.Target);
+                        callInfo.IsProcessed = true; // تنظیم پرچم
                         await SendApiRequest(callInfo, false, callInfo.Target, "");
                         Log($"Outbound call {e.UniqueId} not answered, DialStatus: {dialStatus}, Target: {callInfo.Target}");
                     }
@@ -440,23 +449,31 @@ namespace IssabelCallMonitor
                 else if (callInfo.CallType == "Inbound")
                 {
                     var ext = callInfo.LastDialedExtension ?? ExtractExtensionFromChannel(destination);
+                    if (ext == null)
+                    {
+                        // اگر ext همچنان نال است، از Target استفاده می‌کنیم
+                        ext = callInfo.Target;
+                        Log($"Warning: Could not extract extension from destination {destination} for call {e.UniqueId}, using Target: {ext}");
+                    }
+
                     if (!callInfo.IsRingGroup)
                     {
                         if (dialStatus == "ANSWER")
                         {
-                            if (!callInfo.AnsweredExtensions.Contains(ext))
+                            if (!callInfo.AnsweredExtensions.Contains(ext) && ext != null)
                             {
                                 callInfo.AnsweredExtensions.Add(ext);
-                                callInfo.AnswerTime = DateTime.Now;
-                                await SendApiRequest(callInfo, true, ext, ext); // از ext به‌عنوان CalledTarget و AnsweredBy استفاده می‌شه
+                                callInfo.IsProcessed = true; // تنظیم پرچم
+                                await SendApiRequest(callInfo, true, ext, ext);
                                 Log($"Inbound call {e.UniqueId} answered, Target: {callInfo.Target}, AnsweredBy: {ext}");
                             }
                         }
                         else
                         {
-                            if (!callInfo.MissedExtensions.Contains(ext))
+                            if (!callInfo.MissedExtensions.Contains(ext) && ext != null)
                             {
                                 callInfo.MissedExtensions.Add(ext);
+                                callInfo.IsProcessed = true; // تنظیم پرچم
                                 await SendApiRequest(callInfo, false, ext, "");
                                 Log($"Inbound call {e.UniqueId} not answered, DialStatus: {dialStatus}, Target: {callInfo.Target}");
                             }
@@ -469,7 +486,7 @@ namespace IssabelCallMonitor
                             if (!callInfo.AnsweredExtensions.Contains(ext))
                             {
                                 callInfo.AnsweredExtensions.Add(ext);
-                                callInfo.AnswerTime = DateTime.Now;
+                                callInfo.IsProcessed = true; // تنظیم پرچم
                                 await SendApiRequest(callInfo, true, callInfo.RingGroupNumber, ext);
                                 Log($"Inbound call {e.UniqueId} answered, RingGroup: {callInfo.RingGroupNumber}, AnsweredBy: {ext}");
                             }
@@ -541,7 +558,6 @@ namespace IssabelCallMonitor
                             {
                                 Log($"Outbound call {callInfo.UniqueId} bridge entered by channel {channel}, status handled in DialEnd");
                             }
-                            // تماس‌های ورودی حالا تو DialEnd مدیریت می‌شن
                         }
                         else
                         {
@@ -572,16 +588,6 @@ namespace IssabelCallMonitor
                         isInbound = callInfo.CallType == "Inbound";
                         ringGroupNumber = callInfo.RingGroupNumber;
 
-                        if (callInfo.AnswerTime.HasValue)
-                        {
-                            callInfo.Duration = (int)(DateTime.Now - callInfo.AnswerTime.Value).TotalSeconds;
-                            Log($"Calculated duration for call {e.UniqueId}: {callInfo.Duration} seconds");
-                        }
-                        else
-                        {
-                            callInfo.Duration = 0;
-                        }
-
                         activeCalls.Remove(e.UniqueId);
                         Log($"Call {e.UniqueId} removed from tracking.");
                     }
@@ -598,127 +604,76 @@ namespace IssabelCallMonitor
                     return;
                 }
 
-                if (answeredExtensions.Any())
+                // فقط اگه تماس قبلاً پردازش نشده باشه، درخواست API ارسال می‌کنیم
+                if (!callInfo.IsProcessed)
                 {
-                    var effectiveAnsweredExt = callInfo.CallType == "Outbound" ? callInfo.Caller : callInfo.LastDialedExtension ?? answeredExtensions.FirstOrDefault();
-                    if (!string.IsNullOrEmpty(effectiveAnsweredExt))
+                    if (answeredExtensions.Any())
                     {
-                        var pkCommunication = await QueryCommunication(callInfo.UniqueId, effectiveAnsweredExt);
-                        if (!string.IsNullOrEmpty(pkCommunication))
+                        var effectiveAnsweredExt = callInfo.CallType == "Outbound" ? callInfo.Caller : callInfo.LastDialedExtension ?? answeredExtensions.FirstOrDefault();
+                        if (!string.IsNullOrEmpty(effectiveAnsweredExt))
                         {
-                            callInfo.PkCommunications[effectiveAnsweredExt] = pkCommunication;
                             await SendApiRequest(
                                 callInfo,
                                 true,
                                 callInfo.IsRingGroup && isInbound ? ringGroupNumber : target,
-                                effectiveAnsweredExt,
-                                pkCommunication
+                                effectiveAnsweredExt
                             );
                         }
                     }
-                }
-                else if (callInfo.IsRingGroup && isInbound)
-                {
-                    // اگر هیچ داخلی پاسخ نداده، فقط برای شماره رینگ‌گروپ ثبت می‌کنیم
-                    await SendApiRequest(
-                        callInfo,
-                        false,
-                        ringGroupNumber,
-                        "" // بدون AnsweredBy، چون هیچ‌کس پاسخ نداده
-                    );
-                    Log($"Missed call recorded for ring group {ringGroupNumber}, call {callInfo.UniqueId}");
-                }
-                else if (!callInfo.IsRingGroup)
-                {
-                    // برای تماس‌های غیر رینگ‌گروپ، مثل قبل رفتار می‌کنیم
-                    await SendApiRequest(
-                        callInfo,
-                        false,
-                        target,
-                        ""
-                    );
-                    Log($"Missed call recorded for target {target}, call {callInfo.UniqueId}");
-                }
-            }
-        }
-        private async Task<string> QueryCommunication(string callId, string answeredBy)
-        {
-            try
-            {
-                var endpoint = "http://192.168.50.10:8080/api/admin/Communication/QueryCommunication";
-                var payload = new
-                {
-                    callId,
-                    answeredBy
-                };
-
-                var jsonPayload = JsonConvert.SerializeObject(payload);
-                Log($"Sending QueryCommunication for call {callId}, AnsweredBy: {answeredBy}");
-                Log($"Query payload: {jsonPayload}");
-
-                var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-                var response = await httpClient.PostAsync(endpoint, content);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var responseContent = await response.Content.ReadAsStringAsync();
-                    Log($"QueryCommunication response: {responseContent}");
-
-                    // Parse response (array with single record)
-                    var records = JsonConvert.DeserializeObject<List<Dictionary<string, object>>>(responseContent);
-                    if (records != null && records.Count == 1)
+                    else if (callInfo.IsRingGroup && isInbound)
                     {
-                        var record = records[0];
-                        if (record.ContainsKey("pkCommunication"))
-                        {
-                            var pkCommunication = record["pkCommunication"].ToString();
-                            Log($"Retrieved pkCommunication: {pkCommunication} for call {callId}, AnsweredBy: {answeredBy}");
-                            return pkCommunication;
-                        }
-                        else
-                        {
-                            Log($"Error: pkCommunication not found in QueryCommunication response for call {callId}");
-                            return null;
-                        }
+                        // اگر هیچ داخلی پاسخ نداده، فقط برای شماره رینگ‌گروپ ثبت می‌کنیم
+                        await SendApiRequest(
+                            callInfo,
+                            false,
+                            ringGroupNumber,
+                            ""
+                        );
+                        Log($"Missed call recorded for ring group {ringGroupNumber}, call {callInfo.UniqueId}");
                     }
-                    else
+                    else if (!callInfo.IsRingGroup)
                     {
-                        Log($"Error: Expected 1 record in QueryCommunication response for call {callId}, AnsweredBy: {answeredBy}, but found {records?.Count ?? 0}");
-                        return null;
+                        // برای تماس‌های غیر رینگ‌گروپ
+                        await SendApiRequest(
+                            callInfo,
+                            false,
+                            target,
+                            ""
+                        );
+                        Log($"Missed call recorded for target {target}, call {callInfo.UniqueId}");
                     }
                 }
                 else
                 {
-                    Log($"QueryCommunication failed for call {callId}: Status {response.StatusCode}, Reason: {response.ReasonPhrase}");
-                    return null;
+                    Log($"Skipping SendApiRequest in Hangup for call {e.UniqueId}: Already processed in DialEnd");
                 }
             }
-            catch (Exception ex)
-            {
-                Log($"Error in QueryCommunication for call {callId}: {ex.Message}");
-                return null;
-            }
         }
-
-        private async Task SendApiRequest(CallInfo call, bool answered, string calledTarget, string answeredBy, string pkCommunication = null)
+        private async Task SendApiRequest(CallInfo call, bool answered, string calledTarget, string answeredBy)
         {
             try
             {
-                var endpoint = pkCommunication == null
-                    ? "http://192.168.50.10:8080/api/admin/Communication/InsertCommunication"
-                    : "http://192.168.50.10:8080/api/admin/Communication/UpdateCommunication";
+                var endpoint = "http://192.168.50.10:8080/api/admin/Communication/InsertCommunication";
 
-                Log($"[API] Entering SendApiRequest for call {call.UniqueId}, CalledTarget: {calledTarget}, AnsweredBy: {answeredBy}, answered: {answered}, pkCommunication: {pkCommunication ?? "null"}");
-                
-                string phoneNumber = call.CallType == "Outbound" ? call.Target : call.Caller;
-                string normalizedPhoneNumber = NormalizePhoneNumber(phoneNumber);
-                string payloadCalledTarget = call.CallType == "Outbound" ? call.Caller : calledTarget;
+                // اطمینان از مقداردهی درست CalledTarget و AnsweredBy
+                string payloadCalledTarget = call.CallType == "Outbound" ? call.Caller : (calledTarget ?? call.Target ?? "");
                 string payloadAnsweredBy = call.CallType == "Outbound" ? call.Caller : (answeredBy ?? "");
+                string phoneNumber = call.CallType == "Outbound" ? call.Target : call.Caller;
+
+                // اگر CalledTarget همچنان خالی است، خطا لاگ کنیم
+                if (string.IsNullOrEmpty(payloadCalledTarget))
+                {
+                    Log($"Warning: CalledTarget is empty for call {call.UniqueId}, using default empty string");
+                }
+
+                Log($"[API] Entering SendApiRequest for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, answered: {answered}");
+
+                string normalizedPhoneNumber = NormalizePhoneNumber(phoneNumber);
 
                 var payload = new
                 {
-                    mod = pkCommunication == null ? 1 : 2,
-                    pkCommunication = pkCommunication != null ? int.Parse(pkCommunication) : -1,
+                    mod = 1,
+                    pkCommunication = -1,
                     ParentID = -1,
                     CallId = call.UniqueId,
                     fkOptionDirection = call.CallType == "Outbound" ? 1502 : 1501,
@@ -732,7 +687,7 @@ namespace IssabelCallMonitor
                     CalledTarget = payloadCalledTarget,
                     AnsweredBy = payloadAnsweredBy,
                     CustomerRating = 0,
-                    Duration = call.Duration,
+                    Duration = 0, // همیشه 0 ارسال می‌شود
                     DescriptionEmployee = "",
                     DescriptionCustomer = "",
                     fkAshkhasCompany = -1,
@@ -758,7 +713,7 @@ namespace IssabelCallMonitor
                 };
 
                 var jsonPayload = JsonConvert.SerializeObject(payload);
-                Log($"Sending API request to {endpoint} for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, Status: {(answered ? "Answered" : "Missed")}, Duration: {call.Duration}, fkOptionDirection: {payload.fkOptionDirection}");
+                Log($"Sending API request to {endpoint} for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, Status: {(answered ? "Answered" : "Missed")}, fkOptionDirection: {payload.fkOptionDirection}");
                 Log($"API payload: {jsonPayload}");
 
                 var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
@@ -766,7 +721,7 @@ namespace IssabelCallMonitor
 
                 if (response.IsSuccessStatusCode)
                 {
-                    Log($"API request succeeded for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}, Duration: {call.Duration}");
+                    Log($"API request succeeded for call {call.UniqueId}, CalledTarget: {payloadCalledTarget}, AnsweredBy: {payloadAnsweredBy}");
                 }
                 else
                 {
@@ -824,7 +779,6 @@ namespace IssabelCallMonitor
                 catch { /* Ignore fallback errors */ }
             }
         }
-
         private static string NormalizePhoneNumber(string phoneNumber)
         {
             if (string.IsNullOrWhiteSpace(phoneNumber))
@@ -865,12 +819,11 @@ namespace IssabelCallMonitor
         public string Strategy { get; set; }
         public List<string> AnsweredExtensions { get; set; }
         public List<string> MissedExtensions { get; set; }
-        public DateTime? AnswerTime { get; set; }
-        public int Duration { get; set; }
-        public Dictionary<string, string> PkCommunications { get; set; }
         public string CallType { get; set; }
         public string LinkedId { get; set; }
-        public string LastDialedExtension { get; set; } // اضافه شده
+        public string LastDialedExtension { get; set; }
+        public int Duration { get; set; } // نگه داشته شده، همیشه 0
+        public bool IsProcessed { get; set; } // پرچم جدید برای جلوگیری از پردازش تکراری
     }
     class ChannelInfo
     {
