@@ -177,10 +177,10 @@ namespace IssabelCallMonitor
             var uniqueId = e.UniqueId;
             var trunk = channel.StartsWith("SIP/siptci") ? "siptci" : channel.StartsWith("SIP/2192000119") ? "2192000119" : "unknown";
 
-            // تماس‌های ورودی از ترانک
+            // تماس‌های ورودی یا خروجی از ترانک
             if (channel.StartsWith("SIP/siptci") || channel.StartsWith("SIP/2192000119"))
             {
-                string callType = channel.StartsWith("SIP/siptci") ? "Inbound" : "Outbound";
+                string callType = "Inbound"; // به‌طور پیش‌فرض ورودی، در DialBegin اصلاح می‌شود
                 Log($"New {callType} call from {callerId ?? "unknown"} on trunk {trunk}, uniqueid {uniqueId}, channel {channel}");
 
                 var callInfo = new CallInfo
@@ -227,7 +227,6 @@ namespace IssabelCallMonitor
 
                         if (callInfo != null && ext != null)
                         {
-                            // فقط برای تماس‌های ورودی رینگ‌گروپ بررسی شود
                             if (callInfo.CallType == "Inbound")
                             {
                                 if (ringGroupNumber != null)
@@ -595,8 +594,7 @@ namespace IssabelCallMonitor
 
                 if (answeredExtensions.Any())
                 {
-                    // برای تماس‌های خروجی، همیشه از call.Caller به‌عنوان AnsweredBy استفاده می‌کنیم
-                    var effectiveAnsweredExt = callInfo.CallType == "Outbound" ? callInfo.Caller : callInfo.AnsweredExtensions.FirstOrDefault();
+                    var effectiveAnsweredExt = callInfo.CallType == "Outbound" ? callInfo.Caller : callInfo.LastDialedExtension ?? answeredExtensions.FirstOrDefault();
                     if (!string.IsNullOrEmpty(effectiveAnsweredExt))
                     {
                         var pkCommunication = await QueryCommunication(callInfo.UniqueId, effectiveAnsweredExt);
@@ -723,7 +721,7 @@ namespace IssabelCallMonitor
                     fkOptionCommunicationType = 1651,
                     fkOptionCallReason = -1,
                     fkOptionOwnCallReason = -1,
-                    fkOptionStatus = 1551,
+                    fkOptionStatus = -1,
                     fkOptionCallStatus = answered ? 1511 : 1512,
                     PhoneNumber = phoneNumber,
                     NormalizedPhoneNumber = normalizedPhoneNumber,
