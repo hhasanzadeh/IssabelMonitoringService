@@ -724,7 +724,7 @@ namespace IssabelCallMonitor
                     fkOptionCallReason = -1,
                     fkOptionOwnCallReason = -1,
                     fkOptionStatus = 1551,
-                    fkOptionCallStatus = answered ? 1511 : 1512,
+                    fkOptionCallStatus = answered ? 1511 : 1512, 
                     PhoneNumber = phoneNumber,
                     NormalizedPhoneNumber = normalizedPhoneNumber,
                     CalledTarget = payloadCalledTarget,
